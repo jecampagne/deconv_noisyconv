@@ -188,7 +188,7 @@ if __name__ == '__main__':
             img_clean = np.load(data_clean[i])['img']
             # rescale pixel value in range
             img_clean =  rescale_image_range(img_clean, max_I=1.0, min_I=-1.0)
-            print("clean min:",img_clean.min(),"max:",img_clean.max())
+
 
             out = mysimu.get(img_clean, with_img_conv)
             
