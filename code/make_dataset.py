@@ -150,7 +150,8 @@ if __name__ == '__main__':
     fwhm_max = args.fwhm[1]
     sigma_min = args.sigma[0]
     sigma_max = args.sigma[1]
-    mysimu = Simul(seed=117052025, # [*X]DDMMAAAA
+    seed = args.seed # JEC 24/5/25
+    mysimu = Simul(seed=seed,
                    fwhm_min=fwhm_min, fwhm_max=fwhm_max,
                    sigma_min=sigma_min, sigma_max=sigma_max)
     
@@ -162,7 +163,7 @@ if __name__ == '__main__':
         if data_name == "train":
             out_dir = train_dir
             Ndata = n_train
-            idx_clean_start = 0       # included
+            idx_clean_start = 0     # included
             idx_clean_end = n_train # excluded
             with_img_conv = False
         elif data_name == "test":

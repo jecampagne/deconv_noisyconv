@@ -1,5 +1,5 @@
 import argparse
-import json
+import yaml
 import os
 import random
 import pathlib
@@ -16,6 +16,8 @@ import glob
 
 
 from model import *
+from image_manip import *
+
 
 ################
 # Utils
@@ -54,7 +56,7 @@ class CustumDataset(Dataset):
     'spec': the original spectrum
     """
 
-    def __init__(self, data_path, *, transform=None, ndata=None):
+    def __init__(self, data_path, *, ndata=None):
 
         if ndata is None:
             self.datas = get_list(data_path, "d*.npz")
@@ -63,40 +65,40 @@ class CustumDataset(Dataset):
         
         print(f"CustumDataset: {len(self.datas)} data loaded")
 
-        self.transform = transform
-
     def __len__(self):
         return len(self.datas)
 
     def __getitem__(self, index):
         data = np.load(self.datas[index])
-        image = data["imag"]  # HxW
-        image = np.expand_dims(image, axis=0)  # 1xHxW
-        clean = data["imag_clean"]  # HxW
+        noisy = data["img_noisy"]  # HxW
+        clean = data["img_clean"]  # HxW
+        # torch convention CHW
+        noisy = np.expand_dims(noisy, axis=0)  # 1xHxW
         clean = np.expand_dims(clean, axis=0)  # 1xHxW
 
         # to torch tensor
-        image = torch.from_numpy(image)
+        noisy = torch.from_numpy(noisy)
         clean = torch.from_numpy(clean)
 
-        # choice to transform as torch array
-        # overwise make it as numpy array
-        if self.transform is not None:
-            image = self.transform(image)
 
-        return image, clean
+        return noisy, clean
 
 
 ################
 # train/test 1-epoch
 ################
-def train(args, model, criterion, train_loader, optimizer, epoch):
+def train(args, model, criterion, train_loader, transforms, optimizer, epoch):
     model.train()
     loss_sum = 0  # to get the mean loss over the dataset
     for i_batch, sample_batched in enumerate(train_loader):
-        # get the "X,y"
-        imgs = sample_batched[0].to(args.device)
-        cleans = sample_batched[1].to(args.device)
+        # get the input and target
+        imgs   = sample_batched[0]
+        cleans = sample_batched[1]
+
+        # send to device
+        imgs = imgs.to(args.device)
+        cleans = cleans.to(args.device)
+            
 
         # train step
         optimizer.zero_grad()
@@ -111,14 +113,21 @@ def train(args, model, criterion, train_loader, optimizer, epoch):
     return loss_sum / (i_batch + 1)
 
 
-def test(args, model, criterion, test_loader, epoch):
+def test(args, model, criterion, test_loader, transforms, epoch):
     model.eval()
     loss_sum = 0  # to get the mean loss over the dataset
     with torch.no_grad():
         for i_batch, sample_batched in enumerate(test_loader):
-            # get the "X,y"
-            imgs = sample_batched[0].to(args.device)
-            cleans = sample_batched[1].to(args.device)
+
+            # get the input and target
+            imgs   = sample_batched[0]
+            cleans = sample_batched[1]
+
+            # send to device
+            imgs = imgs.to(args.device)
+            cleans = cleans.to(args.device)
+
+            
             #
             output = model(imgs)
             loss = criterion(output, cleans)
@@ -135,12 +144,13 @@ def test(args, model, criterion, test_loader, epoch):
 def main():
 
     # Training config
-    parser = argparse.ArgumentParser(description="Image-to-Spectre model (I2SM)")
+    parser = argparse.ArgumentParser(description="Deconvolve varibale noisy and convolved images")
     parser.add_argument("--file", help="Config file")
     args0 = parser.parse_args()
 
-    with open(args0.file) as jsonfile:
-        settings_dict = json.load(jsonfile)
+    ## Load yaml configuration file
+    with open(args0.file, 'r') as config:
+        settings_dict = yaml.safe_load(config)
     args = SimpleNamespace(**settings_dict)
 
     # check number of num_workers
@@ -175,7 +185,7 @@ def main():
 
     # dataset & dataloader
     ds_train = CustumDataset(args.train_dir,ndata=100_000)
-    ds_test = CustumDataset(args.test_dir)#,ndata=500)
+    ds_test = CustumDataset(args.test_dir)
 
     train_loader = DataLoader(
         dataset=ds_train,
@@ -194,9 +204,14 @@ def main():
         drop_last=True,
     )
 
-    # get a batch to determin the image/spectrum sizes
+    # transformation: data augmentation and to torch tensor
+    # nb: at least end with ToTensor()
+    train_transforms = None
+    test_transforms = None
+
+    
+    # get a batch to determin the image sizes
     train_img, train_clean = next(iter(train_loader))
-    # img_channels = args.num_channels
     img_H = train_img.shape[2]
     img_W = train_img.shape[3]
     print("image sizes: HxW", img_H, img_W)
@@ -216,9 +231,9 @@ def main():
         sum(p.numel() for p in model.parameters() if p.requires_grad) // 10**6,
         "millions",
     )
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            print(name)
+    #for name, param in model.named_parameters():
+    #    if param.requires_grad:
+    #        print(name)
 
     # put model to device before loading scheduler/optimizer parameters
     model.to(args.device)
@@ -300,7 +315,6 @@ def main():
         print("=> no checkpoints then Go as fresh start")
 
     # loss
-    #criterion = nn.MSELoss(reduction="mean")
     criterion = nn.L1Loss(reduction="mean")
 
     # loop on epochs
@@ -311,14 +325,14 @@ def main():
 
     for epoch in range(start_epoch, args.num_epochs + 1):
         # training
-        train_loss = train(args, model, criterion, train_loader, optimizer, epoch)
+        train_loss = train(args, model, criterion, train_loader, train_transforms, optimizer, epoch)
         # test
-        test_loss = test(args, model, criterion, test_loader, epoch)
-
+        test_loss = test(args, model, criterion, test_loader, test_transforms, epoch)
+        
         # print & book keeping
         print(
             f"Epoch {epoch}, Losses train: {train_loss:.6f}",
-            f"test {test_loss:.6f}, LR= {scheduler.get_last_lr()}",
+            f"test {test_loss:.6f}, LR= {scheduler.get_last_lr()[0]:.2e}",
             f"time {time.time()-t0:.2f}"
         )
         train_loss_history.append(train_loss)

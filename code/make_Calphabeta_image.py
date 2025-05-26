@@ -145,21 +145,6 @@ def make_image(rng, alpha, beta_in, beta_out, seed, image_size, Nc, phi0, rho):
 ################################
 if __name__ == '__main__':
 
-    root_dir = "/lustre/fsn1/projects/rech/ixh/ufd72rp"
-    #root_dir  = "/lustre/fswork/projects/rech/ixh/ufd72rp/datasets"
-    
-    tag_dataset = "dataset_calphabeta"
-
-    out_dir = root_dir + "/" + tag_dataset + "/"
-    
-    try:
-        os.makedirs(
-            out_dir, exist_ok=False
-        )  # avoid erase the existing directories (exit_ok=False)
-    except OSError:
-        pass
-
-
     parser = argparse.ArgumentParser(description="Calpha,beta images")
     parser.add_argument("--file", help="Config file")
     args0 = parser.parse_args()
@@ -171,9 +156,23 @@ if __name__ == '__main__':
     args = SimpleNamespace(**settings_dict)
 
     
-    N_data = args.n_data  # 100_000 train/ 10_000 test / 10_000 valid
+    root_dir = args.root_dir
+    tag_dataset = args.tag_dataset
+
+    out_dir = root_dir + "/" + tag_dataset + "/"
+    
+    try:
+        os.makedirs(
+            out_dir, exist_ok=False
+        )  # avoid erase the existing directories (exit_ok=False)
+    except OSError:
+        pass
+
+
+    N_data = args.n_data  
+    start = args.start
     image_size = args.image_size   # H=W
-    Nc = args.n_edges # number of discontinuities in the contour
+    Nc = args.n_edges
     # regularity ranges: contour: alpha,  background: beta
     alpha_min = args.alpha[0]
     alpha_max = args.alpha[1]
@@ -199,28 +198,27 @@ if __name__ == '__main__':
     rho_max = np.clip(args.phi[1], 0.2, 1.0)
     assert rho_max >= rho_min
     
-    seed = 117052025  #xDDMMAAAA
+    seed = args.seed
 
-    
     print("settings: ", {
+        "seed":seed,
         "N_data":N_data,
+        "start": start,
         "image_size": image_size,
         "Nc":Nc,
         "alpha":[alpha_min, alpha_max],
         "beta_in":[betai_min,betai_max],
         "beta_out":[betao_min,betao_max],
         "phi":[phi0_min, phi0_max],
-        "rho":[rho_min,rho_max],
-        "seed":seed
+        "rho":[rho_min,rho_max]
     })
 
     rng = np.random.default_rng(seed)
 
     t0 = time.time()
-    tprev=t0
-    for i in range(N_data):
+    for i in range(start,N_data):
         if i%1000 == 0:
-            print("i:",i,"time=",time.time()-tprev)
+            print("i:",i,"time=",time.time()-t0)
         
         alpha = rng.uniform(low=alpha_min, high=alpha_max)
         beta_in  = rng.uniform(low=betai_min, high=betai_max)
@@ -239,7 +237,6 @@ if __name__ == '__main__':
 
         f_name = "d_" + str(i) + ".npz"
         np.savez(out_dir + "/" + f_name, **data)
-        tprev = time.time()
     # end
     tf = time.time()
     print("all done!", tf - t0)
