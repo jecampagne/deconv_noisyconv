@@ -17,7 +17,8 @@ import glob
 
 from model import *
 from image_manip import *
-
+#JEC 26may25 from scipy import signal
+from scipy import ndimage
 
 ################
 # Utils
@@ -51,35 +52,62 @@ def get_list(loc, pattern):
 
 
 class CustumDataset(Dataset):
-    """Load the data set which is supposed to be a Numpy structured array
-    'img': the images tensors  N H W
-    'spec': the original spectrum
-    """
+    """Load the data set which is supposed to be a Numpy structured array"""
 
-    def __init__(self, data_path, *, ndata=None):
+    def __init__(self, dataset, rng, fwhm, sigma):
+        """
+        dataset: list of files
+        rng: random geenrator
+        fwhm: (min,max)
+        sigma: (min,max)
+        """
 
-        if ndata is None:
-            self.datas = get_list(data_path, "d*.npz")
-        else:
-            self.datas = get_list(data_path, "d*.npz")[:ndata]
-        
-        print(f"CustumDataset: {len(self.datas)} data loaded")
+        self.datas = dataset
+        self.rng = rng
+        self.fwhm_min, self.fwhm_max = fwhm
+        self.sigma_min, self.sigma_max = sigma
+        print(
+            f"CustumDataset: {len(self.datas)} data loaded",
+            f"fwhm in [{self.fwhm_min:.2f},{self.fwhm_max:.2f}]",
+            f"sigma in [{self.sigma_min:.2f},{self.sigma_max:.2f}]",
+        )
 
     def __len__(self):
         return len(self.datas)
 
     def __getitem__(self, index):
-        data = np.load(self.datas[index])
-        noisy = data["img_noisy"]  # HxW
-        clean = data["img_clean"]  # HxW
+        """
+        transform clean image into conv + noisy image
+        transform from numpy HW  to torch CWH (C=1)
+        """
+        img_clean = np.load(self.datas[index])["img"]
+        # rescale pixel value in range
+        img_clean = rescale_image_range(img_clean, max_I=1.0, min_I=-1.0)
+
+        # convolution
+        psf_fwhm = self.rng.uniform(low=self.fwhm_min, high=self.fwhm_max)
+        psf = make_psf(fwhm=psf_fwhm)
+        # JEC 26May25 use ndimage instead signal
+        ##JEC img_conv = signal.convolve2d(img_clean, psf, mode="same")
+        img_conv = ndimage.convolve(img_clean, psf, mode="constant", cval=0.0)
+
+        # add noise
+        sigma_noise = self.rng.uniform(low=self.sigma_min, high=self.sigma_max)
+        noise = sigma_noise * self.rng.normal(size=img_clean.shape)
+        img_noisy = img_conv + noise
+
+
+        #float32 array
+        img_noisy = np.float32(img_noisy)
+        img_clean = np.float32(img_clean)
+        
         # torch convention CHW
-        noisy = np.expand_dims(noisy, axis=0)  # 1xHxW
-        clean = np.expand_dims(clean, axis=0)  # 1xHxW
+        img_noisy = np.expand_dims(img_noisy, axis=0)  # 1xHxW
+        img_clean = np.expand_dims(img_clean, axis=0)  # 1xHxW
 
         # to torch tensor
-        noisy = torch.from_numpy(noisy)
-        clean = torch.from_numpy(clean)
-
+        noisy = torch.from_numpy(img_noisy)
+        clean = torch.from_numpy(img_clean)
 
         return noisy, clean
 
@@ -92,13 +120,12 @@ def train(args, model, criterion, train_loader, transforms, optimizer, epoch):
     loss_sum = 0  # to get the mean loss over the dataset
     for i_batch, sample_batched in enumerate(train_loader):
         # get the input and target
-        imgs   = sample_batched[0]
+        imgs = sample_batched[0]
         cleans = sample_batched[1]
 
         # send to device
         imgs = imgs.to(args.device)
         cleans = cleans.to(args.device)
-            
 
         # train step
         optimizer.zero_grad()
@@ -120,14 +147,13 @@ def test(args, model, criterion, test_loader, transforms, epoch):
         for i_batch, sample_batched in enumerate(test_loader):
 
             # get the input and target
-            imgs   = sample_batched[0]
+            imgs = sample_batched[0]
             cleans = sample_batched[1]
 
             # send to device
             imgs = imgs.to(args.device)
             cleans = cleans.to(args.device)
 
-            
             #
             output = model(imgs)
             loss = criterion(output, cleans)
@@ -144,12 +170,14 @@ def test(args, model, criterion, test_loader, transforms, epoch):
 def main():
 
     # Training config
-    parser = argparse.ArgumentParser(description="Deconvolve varibale noisy and convolved images")
+    parser = argparse.ArgumentParser(
+        description="Deconvolve varibale noisy and convolved images"
+    )
     parser.add_argument("--file", help="Config file")
     args0 = parser.parse_args()
 
     ## Load yaml configuration file
-    with open(args0.file, 'r') as config:
+    with open(args0.file, "r") as config:
         settings_dict = yaml.safe_load(config)
     args = SimpleNamespace(**settings_dict)
 
@@ -158,10 +186,6 @@ def main():
     if args.num_workers >= NUM_CORES:
         print("Info: # workers set to", NUM_CORES // 2)
         args.num_workers = NUM_CORES // 2
-
-    # where to find the dataset (train & test) (input images & output spectra)
-    args.train_dir = args.data_root_path + args.train_dir
-    args.test_dir = args.data_root_path + args.test_dir
 
     # where to put all model training stuff
     args.out_root_dir = args.out_root_dir + "/" + args.run_tag + "/"
@@ -182,10 +206,32 @@ def main():
 
     # seeding
     set_seed(args.seed)
+    rng = np.random.default_rng(args.seed)
 
     # dataset & dataloader
-    ds_train = CustumDataset(args.train_dir,ndata=100_000)
-    ds_test = CustumDataset(args.test_dir)
+    # where to find the dataset "clean" Calpha images
+    input_dir = args.input_root_dir + args.input_dataset
+    data_clean = get_list(input_dir, "d*.npz")
+    print(f"Clean Dataset: {len(data_clean)} data loaded")
+    n_train = args.n_train
+    n_test = args.n_test
+    n_val = args.n_val  # not used in the training but we should keep them unused
+    assert n_train + n_test + n_val <= len(data_clean), "check sizes of train/test/val"
+    data_train = data_clean[:n_train]
+    data_test = data_clean[n_train : n_train + n_test]
+
+    # convolution & noise params
+    fwhm_min = args.fwhm[0]
+    fwhm_max = args.fwhm[1]
+    sigma_min = args.sigma[0]
+    sigma_max = args.sigma[1]
+
+    ds_train = CustumDataset(
+        data_train, rng, fwhm=(fwhm_min, fwhm_max), sigma=(sigma_min, sigma_max)
+    )
+    ds_test = CustumDataset(
+        data_test, rng, fwhm=(fwhm_min, fwhm_max), sigma=(sigma_min, sigma_max)
+    )
 
     train_loader = DataLoader(
         dataset=ds_train,
@@ -209,7 +255,6 @@ def main():
     train_transforms = None
     test_transforms = None
 
-    
     # get a batch to determin the image sizes
     train_img, train_clean = next(iter(train_loader))
     img_H = train_img.shape[2]
@@ -231,7 +276,7 @@ def main():
         sum(p.numel() for p in model.parameters() if p.requires_grad) // 10**6,
         "millions",
     )
-    #for name, param in model.named_parameters():
+    # for name, param in model.named_parameters():
     #    if param.requires_grad:
     #        print(name)
 
@@ -249,18 +294,22 @@ def main():
     )
 
     if args.use_scheduler:
-    
+
         if args.scheduler == "cosine":
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, args.num_epochs,                                                     eta_min=1e-5)
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, args.num_epochs, eta_min=1e-5
+            )
         elif args.scheduler == "reduce":
-            scheduler= torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode="min", factor=args.lr_decay, patience=args.patience, min_lr=1e-5)        
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode="min",
+                factor=args.lr_decay,
+                patience=args.patience,
+                min_lr=1e-5,
+            )
         else:
             print("FATAL: not known scheduler...")
             return
-
-
-            
 
     # check for resume session: load model/optim/scheduler dictionnaries
     start_epoch = 0
@@ -325,15 +374,17 @@ def main():
 
     for epoch in range(start_epoch, args.num_epochs + 1):
         # training
-        train_loss = train(args, model, criterion, train_loader, train_transforms, optimizer, epoch)
+        train_loss = train(
+            args, model, criterion, train_loader, train_transforms, optimizer, epoch
+        )
         # test
         test_loss = test(args, model, criterion, test_loader, test_transforms, epoch)
-        
+
         # print & book keeping
         print(
             f"Epoch {epoch}, Losses train: {train_loss:.6f}",
             f"test {test_loss:.6f}, LR= {scheduler.get_last_lr()[0]:.2e}",
-            f"time {time.time()-t0:.2f}"
+            f"time {time.time()-t0:.2f}",
         )
         train_loss_history.append(train_loss)
         test_loss_history.append(test_loss)
