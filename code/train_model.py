@@ -10,6 +10,7 @@ import time
 
 import torch
 from torch.utils.data import DataLoader, Dataset
+import torch.nn.functional as F
 import numpy as np
 import regex as re
 import glob
@@ -17,8 +18,7 @@ import glob
 
 from model import *
 from image_manip import *
-#JEC 26may25 from scipy import signal
-from scipy import ndimage
+
 
 ################
 # Utils
@@ -51,25 +51,19 @@ def get_list(loc, pattern):
     return sorted(a, key=get_order)
 
 
+# 13Juin25: JEC add min_I, max_I rescaling
 class CustumDataset(Dataset):
     """Load the data set which is supposed to be a Numpy structured array"""
 
-    def __init__(self, dataset, rng, fwhm, sigma):
+    def __init__(self, dataset, min_I, max_I):
         """
         dataset: list of files
-        rng: random geenrator
-        fwhm: (min,max)
-        sigma: (min,max)
         """
-
         self.datas = dataset
-        self.rng = rng
-        self.fwhm_min, self.fwhm_max = fwhm
-        self.sigma_min, self.sigma_max = sigma
+        self.min_I = min_I
+        self.max_I = max_I
         print(
-            f"CustumDataset: {len(self.datas)} data loaded",
-            f"fwhm in [{self.fwhm_min:.2f},{self.fwhm_max:.2f}]",
-            f"sigma in [{self.sigma_min:.2f},{self.sigma_max:.2f}]",
+            f"CustumDataset: {len(self.datas)} data loaded, rescaling:[{self.min_I},{self.max_I}]",
         )
 
     def __len__(self):
@@ -77,60 +71,76 @@ class CustumDataset(Dataset):
 
     def __getitem__(self, index):
         """
-        transform clean image into conv + noisy image
-        transform from numpy HW  to torch CWH (C=1)
+        rescale image
+        transform from numpy HW  to torch CWH (C=1) float32
         """
         img_clean = np.load(self.datas[index])["img"]
         # rescale pixel value in range
-        img_clean = rescale_image_range(img_clean, max_I=1.0, min_I=-1.0)
+        img_clean = rescale_image_range(img_clean, max_I=self.max_I, min_I=self.min_I)
 
-        # convolution
-        psf_fwhm = self.rng.uniform(low=self.fwhm_min, high=self.fwhm_max)
-        psf = make_psf(fwhm=psf_fwhm)
-        # JEC 26May25 use ndimage instead signal
-        ##JEC img_conv = signal.convolve2d(img_clean, psf, mode="same")
-        img_conv = ndimage.convolve(img_clean, psf, mode="constant", cval=0.0)
-
-        # add noise
-        sigma_noise = self.rng.uniform(low=self.sigma_min, high=self.sigma_max)
-        noise = sigma_noise * self.rng.normal(size=img_clean.shape)
-        img_noisy = img_conv + noise
-
-
-        #float32 array
-        img_noisy = np.float32(img_noisy)
+        # float32 array
         img_clean = np.float32(img_clean)
-        
+
         # torch convention CHW
-        img_noisy = np.expand_dims(img_noisy, axis=0)  # 1xHxW
         img_clean = np.expand_dims(img_clean, axis=0)  # 1xHxW
 
         # to torch tensor
-        noisy = torch.from_numpy(img_noisy)
         clean = torch.from_numpy(img_clean)
 
-        return noisy, clean
+        return clean
 
 
 ################
 # train/test 1-epoch
 ################
 def train(args, model, criterion, train_loader, transforms, optimizer, epoch):
-    model.train()
-    loss_sum = 0  # to get the mean loss over the dataset
-    for i_batch, sample_batched in enumerate(train_loader):
-        # get the input and target
-        imgs = sample_batched[0]
-        cleans = sample_batched[1]
+    # convolution & noise params
+    fwhm_min = args.fwhm[0]
+    fwhm_max = args.fwhm[1]
+    sigma_min = args.sigma[0]
+    sigma_max = args.sigma[1]
 
-        # send to device
-        imgs = imgs.to(args.device)
-        cleans = cleans.to(args.device)
+    # train mode
+    model.train()
+
+    loss_sum = 0  # to get the mean loss over the dataset
+    for i_batch, imgs_clean in enumerate(train_loader):
+
+        # cleans  (N C H W)
+        bs = imgs_clean.shape[0]
+        imgs_clean = imgs_clean.to(args.device)
+
+        # convolution
+        psf_fwhm = args.rng.uniform(low=fwhm_min, high=fwhm_max, size=(bs,))
+        psf = [make_psf(f) for f in psf_fwhm]  # nb. all psf haven't the same HW shapes
+        imgs_conv = torch.stack(
+            [
+                F.conv2d(
+                    imgs_clean[i],
+                    torch.from_numpy(psf[i][None, None, :, :])
+                    .to(torch.float32)
+                    .to(args.device),
+                    padding="same",
+                )
+                for i in range(bs)
+            ]
+        )
+        # add noise
+        sigma_noise = torch.rand(size=(imgs_conv.shape[0], 1, 1, 1), device=args.device)
+        sigma_noise = sigma_noise * (sigma_max - sigma_min) + sigma_min
+        noise = sigma_noise * torch.randn(size=imgs_conv.shape, device=args.device)
+        imgs = imgs_conv + noise
 
         # train step
         optimizer.zero_grad()
         output = model(imgs)
-        loss = criterion(output, cleans)
+
+        #####JEC(10 june 25) TEST ONLY FOT FWHM=0 => denoiser residual
+        #####if args.residual:
+        #####    output = imgs - output # densoised
+        #####
+
+        loss = criterion(output, imgs_clean)
         loss_sum += loss.item()
         # backprop to compute the gradients
         loss.backward()
@@ -141,22 +151,57 @@ def train(args, model, criterion, train_loader, transforms, optimizer, epoch):
 
 
 def test(args, model, criterion, test_loader, transforms, epoch):
+    # convolution & noise params
+    fwhm_min = args.fwhm[0]
+    fwhm_max = args.fwhm[1]
+    sigma_min = args.sigma[0]
+    sigma_max = args.sigma[1]
+
+    # test mode
     model.eval()
+
     loss_sum = 0  # to get the mean loss over the dataset
     with torch.no_grad():
-        for i_batch, sample_batched in enumerate(test_loader):
+        for i_batch, imgs_clean in enumerate(test_loader):
 
-            # get the input and target
-            imgs = sample_batched[0]
-            cleans = sample_batched[1]
+            # cleans  (N C H W)
+            bs = imgs_clean.shape[0]
+            imgs_clean = imgs_clean.to(args.device)
 
-            # send to device
-            imgs = imgs.to(args.device)
-            cleans = cleans.to(args.device)
+            # convolution
+            psf_fwhm = args.rng.uniform(low=fwhm_min, high=fwhm_max, size=(bs,))
+            psf = [
+                make_psf(f) for f in psf_fwhm
+            ]  # nb. all psf haven't the same HW shapes
+            imgs_conv = torch.stack(
+                [
+                    F.conv2d(
+                        imgs_clean[i],
+                        torch.from_numpy(psf[i][None, None, :, :])
+                        .to(torch.float32)
+                        .to(args.device),
+                        padding="same",
+                    )
+                    for i in range(bs)
+                ]
+            )
+            # add noise
+            sigma_noise = torch.rand(
+                size=(imgs_conv.shape[0], 1, 1, 1), device=args.device
+            )
+            sigma_noise = sigma_noise * (sigma_max - sigma_min) + sigma_min
+            noise = sigma_noise * torch.randn(size=imgs_conv.shape, device=args.device)
+            imgs = imgs_conv + noise
 
             #
             output = model(imgs)
-            loss = criterion(output, cleans)
+
+            #####JEC(10 june 25) TEST ONLY FOT FWHM=0 => denoiser residual
+            #####if args.residual:
+            #####    output = imgs - output # densoising by residual
+            #####
+
+            loss = criterion(output, imgs_clean)
             loss_sum += loss.item()
 
     return loss_sum / (i_batch + 1)
@@ -206,7 +251,7 @@ def main():
 
     # seeding
     set_seed(args.seed)
-    rng = np.random.default_rng(args.seed)
+    args.rng = np.random.default_rng(args.seed)  # JEC 26 may 25
 
     # dataset & dataloader
     # where to find the dataset "clean" Calpha images
@@ -220,18 +265,9 @@ def main():
     data_train = data_clean[:n_train]
     data_test = data_clean[n_train : n_train + n_test]
 
-    # convolution & noise params
-    fwhm_min = args.fwhm[0]
-    fwhm_max = args.fwhm[1]
-    sigma_min = args.sigma[0]
-    sigma_max = args.sigma[1]
-
-    ds_train = CustumDataset(
-        data_train, rng, fwhm=(fwhm_min, fwhm_max), sigma=(sigma_min, sigma_max)
-    )
-    ds_test = CustumDataset(
-        data_test, rng, fwhm=(fwhm_min, fwhm_max), sigma=(sigma_min, sigma_max)
-    )
+    #normalization (13June25)
+    ds_train = CustumDataset(data_train, min_I=args.min_I, max_I=args.max_I)
+    ds_test = CustumDataset(data_test, min_I=args.min_I, max_I=args.max_I)
 
     train_loader = DataLoader(
         dataset=ds_train,
@@ -256,9 +292,9 @@ def main():
     test_transforms = None
 
     # get a batch to determin the image sizes
-    train_img, train_clean = next(iter(train_loader))
-    img_H = train_img.shape[2]
-    img_W = train_img.shape[3]
+    train_img = next(iter(train_loader))
+    img_H = train_img.shape[-2]
+    img_W = train_img.shape[-1]
     print("image sizes: HxW", img_H, img_W)
 
     # model instantiation
@@ -270,7 +306,7 @@ def main():
 
     # check ouptut of model is ok. Allow to determine the model config done at run tile
     out = model(train_img)
-    assert out.shape == train_clean.shape
+    assert out.shape == train_img.shape
     print(
         "number of parameters is ",
         sum(p.numel() for p in model.parameters() if p.requires_grad) // 10**6,
@@ -306,6 +342,10 @@ def main():
                 factor=args.lr_decay,
                 patience=args.patience,
                 min_lr=1e-5,
+            )
+        elif args.scheduler == "steplr":
+            scheduler = torch.optim.lr_scheduler.StepLR(
+                optimizer, step_size=args.patience, gamma=args.lr_decay
             )
         else:
             print("FATAL: not known scheduler...")
@@ -364,7 +404,7 @@ def main():
         print("=> no checkpoints then Go as fresh start")
 
     # loss
-    criterion = nn.L1Loss(reduction="mean")
+    criterion = nn.MSELoss(reduction="mean")  # nn.L1Loss(reduction="mean")
 
     # loop on epochs
     t0 = time.time()

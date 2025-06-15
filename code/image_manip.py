@@ -12,7 +12,10 @@ def make_psf(fwhm):
     _fwhm_factor = 2.3548200450309493
 
     assert fwhm >= 0.0, "FATAL: fwhm must be >=0"
-    fwhm = max(fwhm, 1e-16)  # JEC 26May25 allow call fwhm=0
+    ####fwhm = max(fwhm, 1e-16)  # JEC 26May25 allow call fwhm=0
+    # JEC 11 June 25 fwhm<1pix
+    if fwhm < 1.0:
+        return np.array([[1.0]]) # identity
 
     sigma = fwhm / _fwhm_factor
     _inv_sigsq = 1.0 / sigma**2

@@ -30,7 +30,7 @@ class BF_batchNorm(nn.Module):
 
 ######################################################################################
 
-BatchNorm =  nn.BatchNorm2d  # nn.Identity BF_batchNorm
+BatchNorm = nn.BatchNorm2d  # BF_batchNorm
 
 
 ######################################################################################
