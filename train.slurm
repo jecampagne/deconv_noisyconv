@@ -6,7 +6,8 @@
 ##SBATCH -C v100-16g                 # decommenter pour reserver uniquement des GPU V100 16 Go
 #SBATCH -C v100-32g                 # decommenter pour reserver uniquement des GPU V100 32 Go
 ##SBATCH --qos=qos_gpu-dev  # debug 2h max
-#SBATCH --qos=qos_gpu-t4    # 100h max 
+#SBATCH --qos=qos_gpu-t3    # max 20h
+##SBATCH --qos=qos_gpu-t4    # 100h max 
 ##SBATCH --partition=gpu_p2          # decommenter pour la partition gpu_p2 (GPU V100 32 Go)
 ##SBATCH --partition=gpu_p4          # decommenter pour la partition gpu_p4 (GPU A100 40 Go)
 ##SBATCH -C a100                     # decommenter pour la partition gpu_p5 (GPU A100 80 Go)

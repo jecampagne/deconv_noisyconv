@@ -127,7 +127,15 @@ def train(args, model, criterion, train_loader, transforms, optimizer, epoch):
         )
         # add noise
         sigma_noise = torch.rand(size=(imgs_conv.shape[0], 1, 1, 1), device=args.device)
-        sigma_noise = sigma_noise * (sigma_max - sigma_min) + sigma_min
+
+        if args.quadratic:  # JEC 17June25
+            sigma_noise = (
+                sigma_noise * (sigma_max**0.5 - sigma_min**0.5) + sigma_min**0.5
+            )
+            sigma_noise = sigma_noise**2
+        else:
+            sigma_noise = sigma_noise * (sigma_max - sigma_min) + sigma_min
+
         noise = sigma_noise * torch.randn(size=imgs_conv.shape, device=args.device)
         imgs = imgs_conv + noise
 
@@ -189,7 +197,15 @@ def test(args, model, criterion, test_loader, transforms, epoch):
             sigma_noise = torch.rand(
                 size=(imgs_conv.shape[0], 1, 1, 1), device=args.device
             )
-            sigma_noise = sigma_noise * (sigma_max - sigma_min) + sigma_min
+
+            if args.quadratic:  # JEC 17June25
+                sigma_noise = (
+                    sigma_noise * (sigma_max**0.5 - sigma_min**0.5) + sigma_min**0.5
+                )
+                sigma_noise = sigma_noise**2
+            else:
+                sigma_noise = sigma_noise * (sigma_max - sigma_min) + sigma_min
+
             noise = sigma_noise * torch.randn(size=imgs_conv.shape, device=args.device)
             imgs = imgs_conv + noise
 
@@ -265,7 +281,7 @@ def main():
     data_train = data_clean[:n_train]
     data_test = data_clean[n_train : n_train + n_test]
 
-    #normalization (13June25)
+    # normalization (13June25)
     ds_train = CustumDataset(data_train, min_I=args.min_I, max_I=args.max_I)
     ds_test = CustumDataset(data_test, min_I=args.min_I, max_I=args.max_I)
 
