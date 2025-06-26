@@ -1,11 +1,10 @@
 import torch
 from torchvision import transforms
-from torch.utils.data import DataLoader, Dataset
 import random
 import numpy as np
 
 
-############################ Convolution utils ################################
+############################ Calpha utils ################################
 def make_psf(fwhm):
     """model de PSF"""
     # The FWHM of a Gaussian is 2 sqrt(2 ln2) sigma
