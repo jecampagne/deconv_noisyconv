@@ -35,11 +35,7 @@ module purge
 # Decommenter la commande module suivante si vous utilisez la partition "gpu_p5"
 # pour avoir acces aux modules compatibles avec cette partition
 #module load cpuarch/amd
-
-
-#add galsim module
-export PYTHONUSERBASE=$WORK/galsim
-
+ 
 # Chargement des modules
 module load pytorch-gpu/py3/2.6.0
  
